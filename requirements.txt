@@ -7,3 +7,6 @@ pandas
 scikit-learn
 notebook
 lapx
+boto3
+yt-dlp
+seaborn
