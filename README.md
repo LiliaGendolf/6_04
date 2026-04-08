@@ -633,14 +633,13 @@ lag_2 = 2 минуты назад
  from sklearn.ensemble import GradientBoostingRegressor
  from datetime import datetime, timedelta
  
- # --- НАСТРОЙКА ОСНОВНЫХ ПАРАМЕТРОВ ---
+ ### --- НАСТРОЙКА ОСНОВНЫХ ПАРАМЕТРОВ ---
  
  BASE_DIR = os.path.dirname(os.path.abspath(__file__))
  
- # Подключение к базе данных PostgreSQL
+ ### Подключение к базе данных PostgreSQL
  DB_URL = os.getenv("DB_URL", "dbname=user43 user=user43 password=m5q3x8tpc7vn host=2.nntc.nnov.ru port=5402")
- 
- # Горизонт прогнозирования — 30 минут
+
  HORIZON = 30
  rows = cur.fetchall()
  print(f"❌ Ошибка предсказания: {e}")
