@@ -317,8 +317,17 @@ HORIZON = 60
         try:
             with psycopg2.connect(DB_URL) as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT COUNT(DISTINCT track_id) FROM user43.full_tracking_data WHERE detection_time > NOW() - INTERVAL '5 minutes'")
+                   cur.execute("""
+                    SELECT date_trunc('minute', detection_time) AS minute,
+                           COUNT(DISTINCT track_id) AS cars_now
+                    FROM user43.full_tracking_data
+                    WHERE detection_time > NOW() - INTERVAL '10 minutes'
+                    GROUP BY minute
+                    ORDER BY minute DESC
+                    LIMIT 5
+                """)
+
+                rows = cur.fetchall()
                     curr_cars = float(cur.fetchone()[0] or 0)
     
                     pred_val = max(0, int(model.predict([[curr_cars]])[0]))
@@ -618,99 +627,124 @@ lag_2 = 2 минуты назад
 Полученные значения упорядочиваются по времени и преобразуются в вектор признаков фиксированной длины, соответствующий количеству лагов. Далее этот вектор подаётся на вход обученной модели, что обеспечивает более обоснованный и устойчивый прогноз. Дополнительно реализована проверка достаточности данных: если история наблюдений слишком короткая, предсказание не выполняется, что предотвращает некорректные результаты.
 
 Такой подход делает систему более надёжной, поскольку прогноз основывается на реальной динамике изменений трафика. В результате повышается практическая ценность решения для задач мониторинга и анализа транспортных потоков.
-     def predict_and_store(model):
-      try:
-          # --- УСТАНОВЛЕНИЕ СОЕДИНЕНИЯ С БАЗОЙ ДАННЫХ ---
-          # На данном этапе происходит подключение к PostgreSQL с использованием строки подключения DB_URL.
-          # Использование контекстного менеджера (with) гарантирует корректное закрытие соединения
-          # после завершения работы блока, даже в случае возникновения ошибки.
-          # Это важно для предотвращения утечек соединений и повышения устойчивости системы
-          # при длительной работе или многократных вызовах функции.
-          with psycopg2.connect(DB_URL) as conn:
-              with conn.cursor() as cur:
-  
-                  # --- ПОЛУЧЕНИЕ И АГРЕГАЦИЯ ДАННЫХ О ТРАФИКЕ ---
-                  # Здесь выполняется SQL-запрос, который извлекает данные за последние 10 минут.
-                  # Данные агрегируются по минутам с использованием функции date_trunc,
-                  # что позволяет сгруппировать события детекции в равные временные интервалы.
-                  # Для каждого интервала рассчитывается количество уникальных транспортных средств
-                  # через COUNT(DISTINCT track_id), что исключает повторный учёт одного и того же объекта.
-                  # Это обеспечивает более корректную оценку текущей интенсивности движения.
-                  cur.execute("""
-                      SELECT date_trunc('minute', detection_time) AS minute,
-                             COUNT(DISTINCT track_id) AS cars_now
-                      FROM user43.full_tracking_data
-                      WHERE detection_time > NOW() - INTERVAL '10 minutes'
-                      GROUP BY minute
-                      ORDER BY minute DESC
-                      LIMIT 5
-                  """)
-  
-                  # --- ИЗВЛЕЧЕНИЕ РЕЗУЛЬТАТОВ ЗАПРОСА ---
-                  # Результат запроса сохраняется в переменную rows в виде списка кортежей,
-                  # где каждый элемент содержит временную метку и количество машин за минуту.
-                  # Эти данные будут далее использованы для формирования входных признаков модели.
-                  rows = cur.fetchall()
-  
-                  # --- ПРОВЕРКА ДОСТАТОЧНОСТИ ДАННЫХ ---
-                  # Для корректной работы модели необходимо наличие фиксированного количества лагов (в данном случае 5).
-                  # Если данных недостаточно (например, система только запущена или поток данных нестабилен),
-                  # выполнение функции прерывается. Это предотвращает формирование некорректного прогноза
-                  # и повышает надёжность всей системы.
-                  if len(rows) < 5:
-                      print("⚠️ Недостаточно данных для прогноза")
-                      return
-  
-                  # --- ПРЕОБРАЗОВАНИЕ И УПОРЯДОЧИВАНИЕ ДАННЫХ ---
-                  # Данные из БД возвращаются в порядке убывания времени (от новых к старым),
-                  # поэтому для корректного формирования временного ряда необходимо развернуть список.
-                  # В результате получается последовательность значений, упорядоченных по времени,
-                  # что критически важно для корректной работы лаговых признаков.
-                  cars = [row[1] for row in rows][::-1]
-  
-                  # --- ФОРМИРОВАНИЕ ЛАГОВЫХ ПРИЗНАКОВ ---
-                  # На основе полученных данных формируется вектор признаков фиксированной длины.
-                  # В данном случае используются последние 5 значений интенсивности движения,
-                  # которые соответствуют лагам (t-1, t-2, ..., t-5).
-                  # Такой подход позволяет модели учитывать временную зависимость
-                  # и анализировать динамику изменения трафика.
-                  features = cars[-5:]
-  
-                  # --- ПОЛУЧЕНИЕ ПРОГНОЗА ---
-                  # Модель принимает на вход двумерный массив, поэтому признаки оборачиваются в список.
-                  # Результат предсказания преобразуется в целое число, так как речь идёт о количестве ТС.
-                  # Дополнительно используется ограничение снизу (max с 0), чтобы исключить
-                  # возможность появления отрицательных значений, которые не имеют физического смысла.
-                  pred_val = max(0, int(model.predict([features])[0]))
-  
-                  # --- РАСЧЁТ ВРЕМЕНИ ПРОГНОЗА ---
-                  # Определяется момент времени, на который строится прогноз.
-                  # Он вычисляется как текущее время плюс заданный горизонт прогнозирования (HORIZON).
-                  # Это позволяет хранить не только значение прогноза, но и его временную привязку.
-                  target_time = datetime.now() + timedelta(minutes=HORIZON)
-  
-                  # --- СОХРАНЕНИЕ РЕЗУЛЬТАТА В БАЗУ ДАННЫХ ---
-                  # Полученный прогноз записывается в таблицу traffic_predictions.
-                  # Сохраняются:
-                  # - время формирования прогноза (NOW())
-                  # - целевое время (на которое он рассчитан)
-                  # - горизонт прогнозирования
-                  # - предсказанное значение интенсивности
-                  # Это необходимо для последующего анализа, визуализации и оценки качества модели.
-                  cur.execute("""
-                      INSERT INTO user43.traffic_predictions 
-                      (prediction_made_at, target_time, horizon_minutes, predicted_intensity) 
-                      VALUES (NOW(), %s, %s, %s)
-                  """, (target_time, HORIZON, pred_val))
-  
-                  # --- ЛОГИРОВАНИЕ РЕЗУЛЬТАТА ---
-                  # Вывод сообщения позволяет отслеживать работу системы в реальном времени
-                  # и контролировать корректность выполнения функции.
-                  print(f"✅ Прогноз на {target_time}: {pred_val} ТС записан.")
-  
-      except Exception as e:
-          # --- ОБРАБОТКА ОШИБОК ---
-          # В случае возникновения ошибки (например, проблемы с подключением к БД,
-          # некорректные данные или сбой модели) выводится диагностическое сообщение.
-          # Это упрощает отладку и повышает надёжность эксплуатации системы.
-          print(f"❌ Ошибка предсказания: {e}")
+ import pandas as pd
+ import psycopg2
+ import os
+ from sklearn.ensemble import GradientBoostingRegressor
+ from datetime import datetime, timedelta
+ 
+ # --- НАСТРОЙКА ОСНОВНЫХ ПАРАМЕТРОВ ---
+ 
+ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ 
+ # Подключение к базе данных PostgreSQL
+ DB_URL = os.getenv("DB_URL", "dbname=user43 user=user43 password=m5q3x8tpc7vn host=2.nntc.nnov.ru port=5402")
+ 
+ # Горизонт прогнозирования — 30 минут
+ HORIZON = 30
+ rows = cur.fetchall()
+ print(f"❌ Ошибка предсказания: {e}")
+ def train_model():
+     try:
+         # --- ПОДКЛЮЧЕНИЕ К БД И ЗАГРУЗКА ДАННЫХ ---
+         # Загружаем временные метки детекций и идентификаторы отслеживаемых объектов.
+         # Данные используются для формирования временного ряда интенсивности движения.
+         with psycopg2.connect(DB_URL) as conn:
+             query = "SELECT detection_time, track_id FROM user43.v_ml_traffic_cleaned"
+             df = pd.read_sql(query, conn)
+ 
+         # --- ПРОВЕРКА ДОСТАТОЧНОСТИ ДАННЫХ ---
+         if df.empty or len(df) < 20:
+             print("⚠️ Недостаточно данных для обучения")
+             return None
+ 
+         # --- ПРЕОБРАЗОВАНИЕ ДАННЫХ ---
+         df['detection_time'] = pd.to_datetime(df['detection_time'])
+         df_snaps = (
+             df.groupby(df['detection_time'].dt.floor('min'))['track_id']
+             .nunique()
+             .reset_index(name='cars_now')
+             .sort_values('detection_time')
+         )
+ 
+         # --- СОЗДАНИЕ ЛАГОВ ---
+         # Используем предыдущие 5 минут для формирования признаков lag_1..lag_5
+         LAGS = 5
+         for i in range(1, LAGS + 1):
+             df_snaps[f'lag_{i}'] = df_snaps['cars_now'].shift(i)
+ 
+         # Удаляем строки без истории (NaN)
+         df_snaps = df_snaps.dropna()
+         if df_snaps.empty:
+             print("⚠️ После создания лагов нет данных")
+             return None
+ 
+         # --- ПРИЗНАКИ И ЦЕЛЕВАЯ ПЕРЕМЕННАЯ ---
+         feature_cols = [f'lag_{i}' for i in range(1, LAGS + 1)]
+         X = df_snaps[feature_cols]
+         y = df_snaps['cars_now']
+ 
+         # --- ОБУЧЕНИЕ МОДЕЛИ ---
+         model = GradientBoostingRegressor(n_estimators=100, random_state=42)
+         model.fit(X, y)
+ 
+         print("✅ Модель обучена с лагами")
+         return model
+ 
+     except Exception as e:
+         print(f"❌ Ошибка обучения: {e}")
+         return None
+ def predict_and_store(model):
+     try:
+         # --- ПОДКЛЮЧЕНИЕ К БД ---
+         with psycopg2.connect(DB_URL) as conn:
+             with conn.cursor() as cur:
+ 
+                 # --- ПОЛУЧЕНИЕ ПОСЛЕДНИХ ДАННЫХ ---
+                 cur.execute("""
+                     SELECT date_trunc('minute', detection_time) AS minute,
+                            COUNT(DISTINCT track_id) AS cars_now
+                     FROM user43.full_tracking_data
+                     WHERE detection_time > NOW() - INTERVAL '10 minutes'
+                     GROUP BY minute
+                     ORDER BY minute DESC
+                     LIMIT 5
+                 """)
+                 rows = cur.fetchall()
+ 
+                 # --- ПРОВЕРКА ДОСТАТОЧНОСТИ ДАННЫХ ---
+                 if len(rows) < 5:
+                     print("⚠️ Недостаточно данных для прогноза")
+                     return
+                 # Разворачиваем порядок времени (от старых к новым)
+                 history = [row[1] for row in rows][::-1]
+ 
+                 # --- ИТЕРАТИВНЫЙ ПРОГНОЗ НА HORIZON МИНУТ ---
+                 future_preds = []
+                 current_window = history.copy()
+                 STEPS = HORIZON
+ 
+                 for step in range(STEPS):
+                     features = current_window[-5:]
+                     pred = max(0, int(model.predict([features])[0]))
+                     future_preds.append(pred)
+                     current_window.append(pred)
+ 
+                 final_prediction = future_preds[-1]
+                 target_time = datetime.now() + timedelta(minutes=STEPS)
+ 
+                 # --- СОХРАНЕНИЕ ПРОГНОЗА В БАЗУ ---
+                 cur.execute("""
+                     INSERT INTO user43.traffic_predictions 
+                     (prediction_made_at, target_time, horizon_minutes, predicted_intensity) 
+                     VALUES (NOW(), %s, %s, %s)
+                 """, (target_time, STEPS, final_prediction))
+ 
+                 print(f"✅ Прогноз на {target_time}: {final_prediction} ТС записан.")
+ 
+     except Exception as e:
+         print(f"❌ Ошибка предсказания: {e}")
+ if __name__ == "__main__":
+     model = train_model()
+     if model:
+         predict_and_store(model)
